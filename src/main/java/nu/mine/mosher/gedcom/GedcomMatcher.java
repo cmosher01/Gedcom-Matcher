@@ -45,6 +45,13 @@ class GedcomMatcher {
     private static void matchAndUpdate(final Loader oldLoad, final Loader newLoad) {
         sour(oldLoad, newLoad);
         indi(oldLoad, newLoad);
+
+        if (setTitleDuplicates.size() > 0) {
+            System.err.println("------------------------------------------------------------");
+            System.err.println("WARNING: Duplicates found:");
+            System.err.println(setTitleDuplicates);
+        }
+
         remapIds(newLoad.getGedcom().getRoot());
 
         root(oldLoad, newLoad);
