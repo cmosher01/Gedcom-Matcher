@@ -132,7 +132,7 @@ class GedcomMatcher {
     We only match on unique titles.
      */
     private static void sour(final Loader oldLoad, final Loader newLoad) {
-        heutisticRestoreId(oldLoad, GedcomTag.SOUR, GedcomTag.TITL, newLoad);
+        heuristicRestoreId(oldLoad, GedcomTag.SOUR, GedcomTag.TITL, newLoad);
     }
 
     /*
@@ -140,10 +140,10 @@ class GedcomMatcher {
     TODO: add birth year matching for indi's with same name
     */
     private static void indi(final Loader oldLoad, final Loader newLoad) {
-        heutisticRestoreId(oldLoad, GedcomTag.INDI, GedcomTag.NAME, newLoad);
+        heuristicRestoreId(oldLoad, GedcomTag.INDI, GedcomTag.NAME, newLoad);
     }
 
-    private static void heutisticRestoreId(final Loader oldLoad, final GedcomTag tagRecord, final GedcomTag tagMatch, final Loader newLoad) {
+    private static void heuristicRestoreId(final Loader oldLoad, final GedcomTag tagRecord, final GedcomTag tagMatch, final Loader newLoad) {
         // build map of match-values to Ancestry IDs (but ignore duplicates)
         newLoad.getGedcom().getRoot().forEach(top -> {
             final GedcomLine gedcomLine = top.getObject();
