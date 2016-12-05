@@ -1,6 +1,10 @@
 package nu.mine.mosher.gedcom;
 
 import nu.mine.mosher.collection.TreeNode;
+import nu.mine.mosher.gedcom.date.DatePeriod;
+import nu.mine.mosher.gedcom.date.DateRange;
+import nu.mine.mosher.gedcom.date.parser.GedcomDateValueParser;
+import nu.mine.mosher.gedcom.date.parser.ParseException;
 import nu.mine.mosher.gedcom.exception.InvalidLevel;
 import nu.mine.mosher.gedcom.model.Loader;
 
@@ -37,7 +41,7 @@ class GedcomMatcher {
 
     private static void saveGedcom(final Loader load) throws IOException {
         BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(FileDescriptor.out), "UTF-8"));
-        Gedcom.writeFile(load.getGedcom(), out);
+        Gedcom.writeFile(load.getGedcom(), out, 120);
         out.flush();
         out.close();
     }
@@ -140,7 +144,7 @@ class GedcomMatcher {
     TODO: add birth year matching for indi's with same name
     */
     private static void indi(final Loader oldLoad, final Loader newLoad) {
-        heuristicRestoreId(oldLoad, GedcomTag.INDI, GedcomTag.NAME, newLoad);
+        heuristicRestoreIdIndis(oldLoad, newLoad);
     }
 
     private static void heuristicRestoreId(final Loader oldLoad, final GedcomTag tagRecord, final GedcomTag tagMatch, final Loader newLoad) {
@@ -185,6 +189,53 @@ class GedcomMatcher {
         });
     }
 
+    private static void heuristicRestoreIdIndis(final Loader oldLoad, final Loader newLoad) {
+        // build map of match-values to Ancestry IDs (but ignore duplicates)
+        newLoad.getGedcom().getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.INDI)) {
+                if (findChild(top, GedcomTag.REFN).isEmpty()) {
+                    final String name = findChild(top, GedcomTag.NAME);
+                    final String birthYear = getBirthYear(top);
+                    final String title = name+"|"+birthYear;
+                    if (!setTitleDuplicates.contains(title)) {
+                        if (mapTitleToAncestryId.containsKey(title)) {
+                            mapTitleToAncestryId.remove(title);
+                            setTitleDuplicates.add(title);
+                        } else {
+                            mapTitleToAncestryId.put(title, gedcomLine.getID());
+                        }
+                    }
+                }
+            }
+        });
+
+        /*
+        check each original record to see if we can match it
+        to an Ancestry record. If so, we will remap the Ancestry
+        ID back to the Original ID.
+         */
+        oldLoad.getGedcom().getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.INDI)) {
+                if (findChild(top, GedcomTag.REFN).isEmpty()) {
+                    final String name = findChild(top, GedcomTag.NAME);
+                    final String birthYear = getBirthYear(top);
+                    final String title = name+"|"+birthYear;
+                    if (mapTitleToAncestryId.containsKey(title)) {
+                        final String ancestryId = mapTitleToAncestryId.get(title);
+                        final String originalId = gedcomLine.getID();
+                        if (!ancestryId.equals(originalId)) {
+                            mapRemapIds.put(ancestryId, originalId);
+                            mapReverseIds.put(originalId, ancestryId);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+
     private static void remapIds(final TreeNode<GedcomLine> node) {
         node.forEach(c -> remapIds(c));
 
@@ -202,6 +253,10 @@ class GedcomMatcher {
                     // assume that no line with a pointer also has an ID (true as of Gedcom 5.5)
                     node.setObject(new GedcomLine(gedcomLine.getLevel(), "", gedcomLine.getTag().name(), "@"+newId+"@"));
                 }
+            }
+            /* clear out all RINs in the generated file */
+            if (gedcomLine.getTag().equals(GedcomTag.RIN)) {
+                node.setObject(new GedcomLine(gedcomLine.getLevel(), "", gedcomLine.getTag().name(), ""));
             }
         }
     }
@@ -463,6 +518,32 @@ class GedcomMatcher {
         return "";
     }
 
+    private static String getBirthYear(final TreeNode<GedcomLine> nodeIndi) {
+        String year = "";
+        for (final TreeNode<GedcomLine> c : nodeIndi) {
+            final GedcomLine gedcomLine = c.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.BIRT)) {
+                final String fullDate = findChild(c, GedcomTag.DATE);
+                if (!fullDate.isEmpty()) {
+                    try {
+                        final DatePeriod d = parse(fullDate);
+                        year = Integer.toString(d.getStartDate().getEarliest().getYear());
+                    } catch (final Throwable ignore) {
+                        year = "";
+                    }
+                }
+            }
+        }
+        return year;
+    }
+
+    private static DatePeriod parse(final String s) throws ParseException, DateRange.DatesOutOfOrder
+    {
+        final GedcomDateValueParser parser = new GedcomDateValueParser(
+                new StringReader(s));
+
+        return parser.parse();
+    }
 //    private static String findChild(final TreeNode<GedcomLine> item, final String tag) {
 //        for (final TreeNode<GedcomLine> c : item) {
 //            final GedcomLine gedcomLine = c.getObject();
