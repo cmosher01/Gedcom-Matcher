@@ -125,6 +125,7 @@ class GedcomMatcher {
 
     }
 
+    private static final Set<String> setPreExisting = new HashSet<>(4000);
     private static final Map<String, String> mapTitleToAncestryId = new HashMap<>(512);
     private static final Set<String> setTitleDuplicates = new HashSet<>(16);
     private static final Map<String, String> mapRemapIds = new HashMap<>(128);
@@ -190,6 +191,14 @@ class GedcomMatcher {
     }
 
     private static void heuristicRestoreIdIndis(final Loader oldLoad, final Loader newLoad) {
+        // get all ancestry IDs (from newLoad) into setPreExisting
+        newLoad.getGedcom().getRoot().forEach(top -> {
+            final GedcomLine gedcomLine = top.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.INDI)) {
+                setPreExisting.add(gedcomLine.getID());
+            }
+        });
+
         // build map of match-values to Ancestry IDs (but ignore duplicates)
         newLoad.getGedcom().getRoot().forEach(top -> {
             final GedcomLine gedcomLine = top.getObject();
@@ -203,7 +212,10 @@ class GedcomMatcher {
                             mapTitleToAncestryId.remove(title);
                             setTitleDuplicates.add(title);
                         } else {
-                            mapTitleToAncestryId.put(title, gedcomLine.getID());
+                            final String id = gedcomLine.getID();
+                            if (!setPreExisting.contains(id)) {
+                                mapTitleToAncestryId.put(title, id);
+                            }
                         }
                     }
                 }
