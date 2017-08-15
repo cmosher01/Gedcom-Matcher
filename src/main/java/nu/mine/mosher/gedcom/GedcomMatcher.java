@@ -6,6 +6,7 @@ import nu.mine.mosher.gedcom.date.DateRange;
 import nu.mine.mosher.gedcom.date.parser.GedcomDateValueParser;
 import nu.mine.mosher.gedcom.date.parser.ParseException;
 import nu.mine.mosher.gedcom.exception.InvalidLevel;
+import nu.mine.mosher.gedcom.model.GedcomFile;
 import nu.mine.mosher.gedcom.model.Loader;
 
 import java.io.*;
@@ -14,6 +15,11 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Matches two GEDCOM files: OLD (e.g., previous version of my local GEDCOM file), and NEW
+ * (e.g., latest version exported from Family Tree Maker, with changes from Ancestry.com).
+ * Try to pull data from OLD file that is missing from NEW, and write out the updated NEW.
+ */
 class GedcomMatcher {
     public static void main(final String... args) throws InvalidLevel, IOException {
         if (args.length < 2) {
@@ -47,8 +53,10 @@ class GedcomMatcher {
     }
 
     private static void matchAndUpdate(final Loader oldLoad, final Loader newLoad) {
+        repo(oldLoad, newLoad);
         sour(oldLoad, newLoad);
         indi(oldLoad, newLoad);
+        obje(oldLoad, newLoad);
 
         if (setTitleDuplicates.size() > 0) {
             System.err.println("------------------------------------------------------------");
@@ -64,7 +72,54 @@ class GedcomMatcher {
 
         note(oldLoad, newLoad);
         quay(oldLoad, newLoad);
+        sourApid(oldLoad, newLoad);
+        mergeObjes(oldLoad, newLoad);
         addNewNodes();
+    }
+
+    private static void sourApid(Loader oldLoad, Loader newLoad) {
+        System.err.println();
+        System.err.println("------------------------------------------------------------");
+        System.err.println("SOUR._APIDs");
+        oldLoad.getGedcom().getRoot().forEach(oldSourNode -> {
+            final GedcomLine oldSourLine = oldSourNode.getObject();
+            if (oldSourLine.getTag().equals(GedcomTag.SOUR)) {
+                final String apid = findChild(oldSourNode, "_APID");
+                if (!apid.isEmpty()) {
+                    final String newSourId = mapReverseIds.get(oldSourLine.getID());
+                    if (newSourId == null) {
+                        System.err.println("    NOT FOUND, for sour: "+oldSourLine.getID());
+                    } else {
+                        final TreeNode<GedcomLine> newSourNode = newLoad.getGedcom().getNode(newSourId);
+                        assert newSourNode != null;
+                        newSourNode.addChild(new TreeNode<>(new GedcomLine(1, "", "_APID", apid)));
+                    }
+                }
+            }
+        });
+    }
+
+    private static void mergeObjes(Loader oldLoad, Loader newLoad) {
+        System.err.println();
+        System.err.println("------------------------------------------------------------");
+        System.err.println("OBJEs");
+        oldLoad.getGedcom().getRoot().forEach(oldObjeNode -> {
+            final GedcomLine oldObjeLine = oldObjeNode.getObject();
+            if (oldObjeLine.getTag().equals(GedcomTag.OBJE)) {
+                String id = oldObjeLine.getID();
+                if (mapReverseIds.containsKey(id)) {
+                    id = mapReverseIds.get(id);
+                }
+                final TreeNode<GedcomLine> newObjeNode = newLoad.getGedcom().getNode(id);
+                if (newObjeNode == null) {
+                    System.err.println("    NOT FOUND, for obje: "+oldObjeLine.getID());
+                } else {
+                    System.err.println("    found: "+newObjeNode.getObject());
+                    final TreeNode<GedcomLine> newFileNode = findChildNode(newObjeNode, GedcomTag.FILE);
+                    newObjeNode.addChildBefore(findChildNode(oldObjeNode, GedcomTag.FILE), newFileNode);
+                }
+            }
+        });
     }
 
     private static void root(Loader oldLoad, Loader newLoad) {
@@ -125,7 +180,6 @@ class GedcomMatcher {
 
     }
 
-    private static final Set<String> setPreExisting = new HashSet<>(4000);
     private static final Map<String, String> mapTitleToAncestryId = new HashMap<>(512);
     private static final Set<String> setTitleDuplicates = new HashSet<>(16);
     private static final Map<String, String> mapRemapIds = new HashMap<>(128);
@@ -140,13 +194,19 @@ class GedcomMatcher {
         heuristicRestoreId(oldLoad, GedcomTag.SOUR, GedcomTag.TITL, newLoad);
     }
 
+    private static void repo(final Loader oldLoad, final Loader newLoad) {
+        heuristicRestoreId(oldLoad, GedcomTag.REPO, GedcomTag.NAME, newLoad);
+    }
+
     /*
     We do INDIs the same as SOURces, matching on name.
-    TODO: add birth year matching for indi's with same name
     */
     private static void indi(final Loader oldLoad, final Loader newLoad) {
         heuristicRestoreIdIndis(oldLoad, newLoad);
     }
+
+    // Also OBJE, matching on title/format
+    private static void obje(final Loader oldLoad, final Loader newLoad) { heuristicRestoreIdObjes(oldLoad, newLoad); }
 
     private static void heuristicRestoreId(final Loader oldLoad, final GedcomTag tagRecord, final GedcomTag tagMatch, final Loader newLoad) {
         // build map of match-values to Ancestry IDs (but ignore duplicates)
@@ -191,14 +251,6 @@ class GedcomMatcher {
     }
 
     private static void heuristicRestoreIdIndis(final Loader oldLoad, final Loader newLoad) {
-        // get all ancestry IDs (from newLoad) into setPreExisting
-        newLoad.getGedcom().getRoot().forEach(top -> {
-            final GedcomLine gedcomLine = top.getObject();
-            if (gedcomLine.getTag().equals(GedcomTag.INDI)) {
-                setPreExisting.add(gedcomLine.getID());
-            }
-        });
-
         // build map of match-values to Ancestry IDs (but ignore duplicates)
         newLoad.getGedcom().getRoot().forEach(top -> {
             final GedcomLine gedcomLine = top.getObject();
@@ -213,9 +265,7 @@ class GedcomMatcher {
                             setTitleDuplicates.add(title);
                         } else {
                             final String id = gedcomLine.getID();
-                            if (!setPreExisting.contains(id)) {
-                                mapTitleToAncestryId.put(title, id);
-                            }
+                            mapTitleToAncestryId.put(title, id);
                         }
                     }
                 }
@@ -241,12 +291,99 @@ class GedcomMatcher {
                             mapRemapIds.put(ancestryId, originalId);
                             mapReverseIds.put(originalId, ancestryId);
                         }
+                    } else {
+                        System.err.println("WARNING: Cannot match INDI based on name|birthyear: "+title);
                     }
                 }
             }
         });
     }
 
+    private static void heuristicRestoreIdObjes(final Loader oldLoad, final Loader newLoad) {
+        final Map<String, String> mapNewObjeToIndi = new HashMap<>();
+        newLoad.getGedcom().getRoot().forEach(indi-> {
+            final GedcomLine gedcomLine = indi.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.INDI)) {
+                final String name = findChild(indi, GedcomTag.NAME);
+                for (final TreeNode<GedcomLine> c : indi) {
+                    final GedcomLine cLine = c.getObject();
+                    if (cLine.getTag().equals(GedcomTag.OBJE)) {
+                        // don't bother checking for dups, this is heuristic only
+                        mapNewObjeToIndi.put(cLine.getPointer(), name);
+                    }
+                }
+            }
+        });
+
+        // build map of match-values to Ancestry IDs (but ignore duplicates)
+        newLoad.getGedcom().getRoot().forEach(obje -> {
+            final GedcomLine gedcomLine = obje.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.OBJE)) {
+                if (findChild(obje, GedcomTag.REFN).isEmpty()) {
+                    for (final TreeNode<GedcomLine> c : obje) {
+                        if (c.getObject().getTag().equals(GedcomTag.FILE)) {
+                            final String title = findChild(c, GedcomTag.TITL);
+                            final String usedBy = mapNewObjeToIndi.get(gedcomLine.getID());
+                            final String match = title+"|"+usedBy;
+                            if (!setTitleDuplicates.contains(match)) {
+                                if (mapTitleToAncestryId.containsKey(match)) {
+                                    mapTitleToAncestryId.remove(match);
+                                    setTitleDuplicates.add(match);
+                                } else {
+                                    final String id = gedcomLine.getID();
+                                    mapTitleToAncestryId.put(match, id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        final Map<String, String> mapOldObjeToIndi = new HashMap<>();
+        oldLoad.getGedcom().getRoot().forEach(indi-> {
+            final GedcomLine gedcomLine = indi.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.INDI)) {
+                final String name = findChild(indi, GedcomTag.NAME);
+                for (final TreeNode<GedcomLine> c : indi) {
+                    final GedcomLine cLine = c.getObject();
+                    if (cLine.getTag().equals(GedcomTag.OBJE)) {
+                        // don't bother checking for dups, this is heuristic only
+                        mapOldObjeToIndi.put(cLine.getPointer(), name);
+                    }
+                }
+            }
+        });
+        /*
+        check each original record to see if we can match it
+        to an Ancestry record. If so, we will remap the Ancestry
+        ID back to the Original ID.
+         */
+        oldLoad.getGedcom().getRoot().forEach(obje -> {
+            final GedcomLine gedcomLine = obje.getObject();
+            if (gedcomLine.getTag().equals(GedcomTag.OBJE)) {
+                if (findChild(obje, GedcomTag.REFN).isEmpty()) {
+                    for (final TreeNode<GedcomLine> c : obje) {
+                        if (c.getObject().getTag().equals(GedcomTag.FILE)) {
+                            final String title55 = findChild(c, GedcomTag.TITL);
+                            final String usedBy = mapOldObjeToIndi.get(gedcomLine.getID());
+                            final String match = title55 + "|" + usedBy;
+                            if (mapTitleToAncestryId.containsKey(match)) {
+                                final String ancestryId = mapTitleToAncestryId.get(match);
+                                final String originalId = gedcomLine.getID();
+                                if (!ancestryId.equals(originalId)) {
+                                    mapRemapIds.put(ancestryId, originalId);
+                                    mapReverseIds.put(originalId, ancestryId);
+                                }
+                            } else {
+                                System.err.println("WARNING: Cannot match OBJE based on title|person: " + match);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     private static void remapIds(final TreeNode<GedcomLine> node) {
         node.forEach(c -> remapIds(c));
@@ -521,13 +658,27 @@ class GedcomMatcher {
     }
 
     private static String findChild(final TreeNode<GedcomLine> item, final GedcomTag tag) {
+        return findChild(item, tag.toString());
+    }
+
+    private static String findChild(final TreeNode<GedcomLine> item, final String tag) {
         for (final TreeNode<GedcomLine> c : item) {
             final GedcomLine gedcomLine = c.getObject();
-            if (gedcomLine.getTag().equals(tag)) {
+            if (gedcomLine.getTagString().equals(tag)) {
                 return gedcomLine.isPointer() ? gedcomLine.getPointer() : gedcomLine.getValue();
             }
         }
         return "";
+    }
+
+    private static TreeNode<GedcomLine> findChildNode(final TreeNode<GedcomLine> item, final GedcomTag tag) {
+        for (final TreeNode<GedcomLine> c : item) {
+            final GedcomLine gedcomLine = c.getObject();
+            if (gedcomLine.getTag().equals(tag)) {
+                return c;
+            }
+        }
+        return null;
     }
 
     private static String getBirthYear(final TreeNode<GedcomLine> nodeIndi) {
@@ -573,7 +724,7 @@ class GedcomMatcher {
     private static void quay(final Loader oldLoad, final Loader newLoad) {
         System.err.println();
         System.err.println("------------------------------------------------------------");
-        System.err.println("Quality");
+        System.err.println("Quality / _APID");
         oldLoad.getGedcom().getRoot().forEach(top -> {
             final GedcomLine topLine = top.getObject();
             top.forEach(item -> {
@@ -624,7 +775,14 @@ class GedcomMatcher {
                 break;
             }
         }
-        if (quay == null) {
+        TreeNode<GedcomLine> apid = null;
+        for (final TreeNode<GedcomLine> q : att) {
+            if (q.getObject().getTagString().equals("_APID")) {
+                apid = q;
+                break;
+            }
+        }
+        if (quay == null && apid == null) {
             return;
         }
 
@@ -649,7 +807,12 @@ class GedcomMatcher {
                             System.err.println("    found:" + attNew);
                             ++cFound;
                             if (cFound == 1) {
-                                newNodes.add(new ChildToBeAdded(attNew, quay));
+                                if (quay != null) {
+                                    newNodes.add(new ChildToBeAdded(attNew, quay));
+                                }
+                                if (apid != null) {
+                                    newNodes.add(new ChildToBeAdded(attNew, apid));
+                                }
                             }
                         }
                     }
@@ -657,23 +820,31 @@ class GedcomMatcher {
             }
         }
         if (cFound == 0) {
-            System.err.println("    NOT FOUND, for quay: " + top.getObject() + " | " + item.getObject().getTag() + " | " + att.getObject());
+            System.err.println("    NOT FOUND, for "+(quay!=null?"quay":"")+","+(apid!=null?"apid":"")+": " + top.getObject() + " | " + item.getObject().getTag() + " | " + att.getObject());
         } else if (cFound > 1) {
-            System.err.println("    MULTIPLE MATCHING EVENTS FOUND, for quay: " + top.getObject() + " | " + item.getObject().getTag() + " | " + att.getObject());
+            System.err.println("    MULTIPLE MATCHING EVENTS FOUND, for  "+(quay!=null?"quay":"")+","+(apid!=null?"apid":"")+": " + top.getObject() + " | " + item.getObject().getTag() + " | " + att.getObject());
         }
     }
 
     static class ChildToBeAdded {
         TreeNode<GedcomLine> parent;
         TreeNode<GedcomLine> child;
+        TreeNode<GedcomLine> before;
         ChildToBeAdded(TreeNode<GedcomLine> parent, TreeNode<GedcomLine> child) {
-            this.parent = parent; this.child = child;
+            this(parent, child, null);
+        }
+        ChildToBeAdded(TreeNode<GedcomLine> parent, TreeNode<GedcomLine> child, TreeNode<GedcomLine> before) {
+            this.parent = parent; this.child = child; this.before = before;
         }
     }
     private static final List<ChildToBeAdded> newNodes = new ArrayList<>(256);
     private static void addNewNodes() {
         newNodes.forEach(a -> {
-            a.parent.addChild(a.child);
+            if (a.before == null) {
+                a.parent.addChild(a.child);
+            } else {
+                a.parent.addChildBefore(a.child, a.before);
+            }
         });
     }
 }
