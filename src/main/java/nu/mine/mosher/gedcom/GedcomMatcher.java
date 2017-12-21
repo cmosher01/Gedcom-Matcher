@@ -6,11 +6,10 @@ import nu.mine.mosher.gedcom.date.DateRange;
 import nu.mine.mosher.gedcom.date.parser.GedcomDateValueParser;
 import nu.mine.mosher.gedcom.date.parser.ParseException;
 import nu.mine.mosher.gedcom.exception.InvalidLevel;
-import nu.mine.mosher.gedcom.model.GedcomFile;
 import nu.mine.mosher.gedcom.model.Loader;
 
 import java.io.*;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -19,11 +18,14 @@ import java.util.regex.Pattern;
  * Matches two GEDCOM files: OLD (e.g., previous version of my local GEDCOM file), and NEW
  * (e.g., latest version exported from Family Tree Maker, with changes from Ancestry.com).
  * Try to pull data from OLD file that is missing from NEW, and write out the updated NEW.
+ *
+ * TODO: May need a new version of this program that just extracts _APID from the new
+ * file and updates the original file (i.e., only make _APID changes).
  */
 class GedcomMatcher {
     public static void main(final String... args) throws InvalidLevel, IOException {
         if (args.length < 2) {
-            throw new IllegalArgumentException("usage: java -jar gedcom-matcher.jar old.ged new.ged >out.ged");
+            throw new IllegalArgumentException("\n\nusage:\n    gedcom-matcher old.ged new.ged >out.ged");
         }
 
         final Loader oldLoad = loadGedcom(args[0]);
@@ -37,22 +39,33 @@ class GedcomMatcher {
     }
 
     private static Loader loadGedcom(final String filename) throws IOException, InvalidLevel {
-        final File file = new File(filename);
-        final Charset charset = Gedcom.getCharset(file);
-        final GedcomTree gt = Gedcom.parseFile(file, charset);
+        final File in = new File(filename);
+        final GedcomTree gt = Gedcom.readFile(new BufferedInputStream(new FileInputStream(in)));
+        new GedcomConcatenator(gt).concatenate();
+        gt.setCharset(StandardCharsets.UTF_8);
         final Loader loader = new Loader(gt, filename);
         loader.parse();
         return loader;
     }
 
     private static void saveGedcom(final Loader load) throws IOException {
-        BufferedWriter out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(FileDescriptor.out), "UTF-8"));
-        Gedcom.writeFile(load.getGedcom(), out, 120);
+        final GedcomTree gt = load.getGedcom();
+        gt.setMaxLength(60);
+        new GedcomUnconcatenator(gt).unconcatenate();
+        final BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(FileDescriptor.out));
+        Gedcom.writeFile(gt, out);
         out.flush();
         out.close();
     }
 
     private static void matchAndUpdate(final Loader oldLoad, final Loader newLoad) {
+        /* TODO: new algorithm:
+        1. restore IDs (already have other program for this)
+        2. match on .INDI.*.SOUR
+        3. update OLD _APID from NEW _APID
+        4. report error for unmatched NEW _APID
+        5. write OLD file
+         */
         repo(oldLoad, newLoad);
         sour(oldLoad, newLoad);
         indi(oldLoad, newLoad);
@@ -72,8 +85,10 @@ class GedcomMatcher {
 
         note(oldLoad, newLoad);
         quay(oldLoad, newLoad);
-        sourApid(oldLoad, newLoad);
+//        sourApid(oldLoad, newLoad);
         mergeObjes(oldLoad, newLoad);
+        xy(oldLoad, newLoad);
+
         addNewNodes();
     }
 
@@ -411,6 +426,38 @@ class GedcomMatcher {
     }
 
     /*
+    _XY records from old file (from Genealogy Research Organizer program) are never
+    changed by Ancestry, so restore all of the unconditionally.
+     */
+    private static void xy(final Loader oldLoad, final Loader newLoad) {
+        System.err.println("------------------------------------------------------------");
+        System.err.println("XY");
+        oldLoad.getGedcom().getRoot().forEach(oldIndi -> {
+            final GedcomLine gedcomLine = oldIndi.getObject();
+            final GedcomTag tag = gedcomLine.getTag();
+            if (tag.equals(GedcomTag.INDI)) {
+                restoreXY(oldIndi, newLoad);
+            }
+        });
+    }
+
+    private static void restoreXY(final TreeNode<GedcomLine> oldIndi, final Loader newLoad) {
+        final TreeNode<GedcomLine> newIndi = newLoad.getGedcom().getNode(oldIndi.getObject().getID());
+        if (newIndi != null) {
+            final String oldXY = findChild(oldIndi, "_XY");
+            if (!oldXY.isEmpty()) {
+                final TreeNode<GedcomLine> newXY = findChildNode(newIndi, "_XY");
+                if (newXY == null) {
+                    final TreeNode<GedcomLine> xy = new TreeNode<>(newIndi.getObject().createChild("_XY", oldXY));
+                    newNodes.add(new ChildToBeAdded(newIndi, xy));
+                } else {
+                    newXY.setObject(newXY.getObject().replaceValue(oldXY));
+                }
+            }
+        }
+    }
+
+    /*
     On import, Ancestry converts FROM-TO DATE records to ranges (BET style).
     This tries to match them to the dates from original.ged and converts them
     back again.
@@ -426,14 +473,14 @@ class GedcomMatcher {
             final GedcomLine gedcomLine = top.getObject();
             final GedcomTag tag = gedcomLine.getTag();
             if (tag.equals(GedcomTag.INDI)) {
-                dateRangeToPeriodFor(top, oldLoad, newLoad, tagsIndi);
+                dateRangeToPeriodFor(top, newLoad, tagsIndi);
             } else if (tag.equals(GedcomTag.FAM)) {
-                dateRangeToPeriodFor(top, oldLoad, newLoad, tagsFam);
+                dateRangeToPeriodFor(top, newLoad, tagsFam);
             }
         });
     }
 
-    private static void dateRangeToPeriodFor(final TreeNode<GedcomLine> top, final Loader oldLoad, final Loader newLoad, final Set<GedcomTag> tagsEvents) {
+    private static void dateRangeToPeriodFor(final TreeNode<GedcomLine> top, final Loader newLoad, final Set<GedcomTag> tagsEvents) {
         top.forEach(event -> {
             if (tagsEvents.contains(event.getObject().getTag())) {
                 final TreeNode<GedcomLine> d = findDate(event);
@@ -533,7 +580,6 @@ class GedcomMatcher {
         System.err.println("------------------------------------------------------------");
         System.err.println("Notes");
         oldLoad.getGedcom().getRoot().forEach(top -> {
-            final GedcomLine topLine = top.getObject();
             top.forEach(item -> {
                 item.forEach(att -> {
                     final GedcomLine attLine = att.getObject();
@@ -671,14 +717,18 @@ class GedcomMatcher {
         return "";
     }
 
-    private static TreeNode<GedcomLine> findChildNode(final TreeNode<GedcomLine> item, final GedcomTag tag) {
+    private static TreeNode<GedcomLine> findChildNode(final TreeNode<GedcomLine> item, final String tag) {
         for (final TreeNode<GedcomLine> c : item) {
             final GedcomLine gedcomLine = c.getObject();
-            if (gedcomLine.getTag().equals(tag)) {
+            if (gedcomLine.getTagString().equals(tag)) {
                 return c;
             }
         }
         return null;
+    }
+
+    private static TreeNode<GedcomLine> findChildNode(final TreeNode<GedcomLine> item, final GedcomTag tag) {
+        return findChildNode(item, tag.toString());
     }
 
     private static String getBirthYear(final TreeNode<GedcomLine> nodeIndi) {
@@ -811,6 +861,10 @@ class GedcomMatcher {
                                     newNodes.add(new ChildToBeAdded(attNew, quay));
                                 }
                                 if (apid != null) {
+                                    //!!!!!!!!!!!!!!!!!!!!!
+                                    // Need to be smarter about adding _APID here.
+                                    // 1. There could already be an _APID, so don't just add a new one.
+                                    // 2. There could be more than one citation to the same source.
                                     newNodes.add(new ChildToBeAdded(attNew, apid));
                                 }
                             }
